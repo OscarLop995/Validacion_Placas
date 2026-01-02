@@ -46,74 +46,103 @@ class InfractionChecker:
     
     def cerrar_popup(self):
         """Cierra el popup inicial si existe"""
+        time.sleep(3)  # Espera inicial para que el popup cargue
         try:
-            # Espera máximo 5 segundos por el popup
             wait = WebDriverWait(self.driver, 5)
-            # Ajusta estos selectores según la página específica
-            popup_close = wait.until(EC.element_to_be_clickable((By.XPATH, "(//span[@class='modal-info-close'])[1]")))
+            popup_close = wait.until(EC.element_to_be_clickable(
+                (By.XPATH, "(//span[@class='modal-info-close'])[1]")
+            ))
             popup_close.click()
             print("✓ Popup cerrado")
-            time.sleep(2)
+            #time.sleep(2)
         except Exception as e:
             print("No se encontró popup o ya estaba cerrado")
     
-    def buscar_placa(self, placa):
+    def buscar_placa(self, placa, intentos_maximos=3):
         """
-        Busca una placa en la página
+        Busca una placa en la página con sistema de reintentos
         
         Args:
             placa: Número de placa a buscar
+            intentos_maximos: Número de reintentos en caso de error
             
         Returns:
             dict con placa y resultado (Sí/No)
         """
-        try:
-            # Buscar el campo de entrada - ajusta el selector según tu página
-            input_campo = WebDriverWait(self.driver, 10).until(
-                EC.presence_of_element_located((By.ID, "txtBusqueda"))
-                # Alternativas comunes:
-                # (By.NAME, "placa")
-                # (By.XPATH, "//input[@type='text']")
-            )
-            
-            # Limpiar campo y escribir placa
-            input_campo.clear()
-            input_campo.send_keys(placa)
-            input_campo.send_keys(Keys.RETURN)
-            
-            # Esperar resultados
-            time.sleep(3)  # Ajusta según necesidad
-            
-            # Buscar en el resultado - ajusta según la palabra que indique infracción
-            page_text = self.driver.page_source.lower()
-            
-            # Palabras que indican infracción (personaliza según tu caso)
-            palabras_infraccion = ['comparendos y multas']
-            palabras_sin_infraccion = ['no tienes comparendos ni multas']
-            
-            tiene_infraccion = any(palabra in page_text for palabra in palabras_infraccion)
-            sin_infraccion = any(palabra in page_text for palabra in palabras_sin_infraccion)
-            
-            if sin_infraccion:
-                resultado = "No"
-            elif tiene_infraccion:
-                resultado = "Sí"
-            else:
-                resultado = "No determinado"
-            
-            print(f"Placa {placa}: {resultado}")
-            
-            return {
-                'Placa': placa,
-                'Tiene_Infraccion': resultado
-            }
-            
-        except Exception as e:
-            print(f"Error al procesar placa {placa}: {str(e)}")
-            return {
-                'Placa': placa,
-                'Tiene_Infraccion': 'Error'
-            }
+        for intento in range(intentos_maximos):
+            try:
+                # Buscar el campo de entrada con espera extendida
+                input_campo = WebDriverWait(self.driver, 15).until(
+                    EC.presence_of_element_located((By.ID, "txtBusqueda"))
+                )
+                
+                # Asegurar que el campo esté interactuable
+                WebDriverWait(self.driver, 10).until(
+                    EC.element_to_be_clickable((By.ID, "txtBusqueda"))
+                )
+                
+                # Limpiar campo y escribir placa
+                input_campo.clear()
+                time.sleep(0.5)
+                input_campo.send_keys(placa)
+                input_campo.send_keys(Keys.RETURN)
+                
+                # ESPERA EXPLÍCITA: Esperar hasta 20 segundos por el resultado
+                WebDriverWait(self.driver, 20).until(
+                    lambda driver: 
+                        'comparendos y multas' in driver.page_source.lower() or
+                        'no tienes comparendos ni multas' in driver.page_source.lower()
+                )
+                
+                # Pequeña pausa adicional para asegurar carga completa
+                time.sleep(1)
+                
+                # Buscar en el resultado
+                page_text = self.driver.page_source.lower()
+                
+                # Palabras que indican infracción
+                palabras_infraccion = ['comparendos y multas']
+                palabras_sin_infraccion = ['no tienes comparendos ni multas']
+                
+                tiene_infraccion = any(palabra in page_text for palabra in palabras_infraccion)
+                sin_infraccion = any(palabra in page_text for palabra in palabras_sin_infraccion)
+                
+                if sin_infraccion:
+                    resultado = "No"
+                elif tiene_infraccion:
+                    resultado = "Sí"
+                else:
+                    resultado = "No determinado"
+                
+                print(f"Placa {placa}: {resultado}")
+                
+                return {
+                    'Placa': placa,
+                    'Tiene_Infraccion': resultado
+                }
+                
+            except Exception as e:
+                print(f"  ⚠ Intento {intento + 1}/{intentos_maximos} falló para {placa}: {str(e)}")
+                
+                if intento < intentos_maximos - 1:
+                    # Aún quedan intentos
+                    print(f"  → Reintentando en 5 segundos...")
+                    time.sleep(5)
+                    
+                    # Intentar refrescar la página para estado limpio
+                    try:
+                        self.driver.refresh()
+                        time.sleep(3)
+                        self.cerrar_popup()
+                    except:
+                        pass
+                else:
+                    # Ya no quedan más intentos
+                    print(f"  ✗ Error definitivo en placa {placa}")
+                    return {
+                        'Placa': placa,
+                        'Tiene_Infraccion': 'Error'
+                    }
     
     def procesar_todas_placas(self):
         """Procesa todas las placas del archivo"""
@@ -136,7 +165,20 @@ class InfractionChecker:
                 resultado = self.buscar_placa(placa)
                 self.resultados.append(resultado)
                 
-                # Pausa entre consultas para no saturar el servidor
+                # GUARDAR PROGRESO CADA 50 PLACAS
+                if i % 50 == 0:
+                    self.guardar_resultados('progreso_temporal.csv')
+                    print(f"  💾 Progreso guardado: {i}/{len(placas)} placas")
+                
+                # REFRESCAR NAVEGADOR CADA 100 PLACAS (evita acumulación de memoria)
+                if i % 100 == 0 and i < len(placas):
+                    print(f"  🔄 Refrescando navegador para optimizar memoria...")
+                    self.driver.refresh()
+                    time.sleep(3)
+                    self.cerrar_popup()
+                    time.sleep(2)
+                
+                # Pausa entre consultas
                 time.sleep(2)
             
             print("\n✓ Procesamiento completado")
@@ -146,7 +188,7 @@ class InfractionChecker:
             print("Navegador cerrado")
     
     def guardar_resultados(self, archivo_salida='resultados_infracciones.csv'):
-        """Guarda los resultados en un archivo CSV"""
+        """Guarda los resultados en un archivo CSV o Excel"""
         df_resultados = pd.DataFrame(self.resultados)
         
         if archivo_salida.endswith('.csv'):
@@ -161,10 +203,10 @@ class InfractionChecker:
 # Ejemplo de uso
 if __name__ == "__main__":
     # Configuración
-    URL_CONSULTA = "https://www.fcm.org.co/simit/#/home-public"  # Cambia por la URL real
-    ARCHIVO_ENTRADA = "C:/Users/oscar/OneDrive/Documents/FT-HQ-C&P-18 Control de Infracciones de Tránsito.xlsx"  # Tu archivo con las placas
-    COLUMNA_PLACAS = "Placa"  # Nombre de la columna con las placas
-    ARCHIVO_SALIDA = "resultados_infracciones.csv"
+    URL_CONSULTA = "https://www.fcm.org.co/simit/#/home-public"
+    ARCHIVO_ENTRADA = r"C:\Users\oscar\OneDrive\Documents\FT-HQ-C&P-18 Control de Infracciones de Tránsito.xlsx"
+    COLUMNA_PLACAS = "Placa"
+    ARCHIVO_SALIDA = "resultados_infracciones.xlsx"  # Puedes cambiar a .csv si prefieres
     
     # Crear instancia y ejecutar
     checker = InfractionChecker(URL_CONSULTA, ARCHIVO_ENTRADA, COLUMNA_PLACAS)
